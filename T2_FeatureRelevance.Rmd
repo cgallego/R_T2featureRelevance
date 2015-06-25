@@ -1,0 +1,483 @@
+T2 features 
+========================================================
+
+- This code analysis T2w feature relevance among mass and non-mass lesions
+- Plot z-scores between relevant T2w features for mass and non-mass lesions
+- Then, analyzes added value of T2w features on discrimination ability (added pAUC ROC value)
+
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width =250)
+```
+
+```{r}
+require(ggplot2)
+library("RSQLite")
+setwd("Z:/Cristina/MassNonmass/Section 2 - Experiments/featureRelevance")
+```
+
+
+```{r}
+read_T2data <- function(subdata) {
+  sqlite <- dbDriver("SQLite")
+  conn <- dbConnect(sqlite, "stage1T2updatedFeatures.db")
+  
+  # 2) all T1W features
+  lesionsQuery <- dbGetQuery(conn, "SELECT *
+           FROM  stage1features
+           INNER JOIN lesion ON (stage1features.lesion_id = lesion.lesion_id)
+           INNER JOIN f_T2 ON (stage1features.lesion_id = f_T2.lesion_id)")
+  
+  # prune entries and extract feature subsets
+  # corresponds to 5 entries lesion info, 34 dynamic, 19 morpho, 34 texture fueatures
+  lesionfields =  names(lesionsQuery)
+  lesioninfo = lesionsQuery[c(2,130,130:154)]
+  T2info = lesionsQuery[c(155:202)]
+  T2features = lesionsQuery[c(156,153,157,165:166,168:202,104:123)]
+  
+  T2features$lesion_label <- as.factor(T2features$lesion_label)
+  summary(T2features$lesion_label)
+ 
+    
+  if(subdata=="mass"){
+    # organized the data by subdata
+    M<-subset(T2features, lesion_label=="massB" | lesion_label=="massM")
+    ifelse( M$lesion_label == "massB", "NC", "C") -> M$lesion_label
+    T2features = M
+    
+  }
+  if(subdata=="nonmass"){
+    # organized the data by subdata
+    N<-subset(T2features, lesion_label=="nonmassB" | lesion_label=="nonmassM")
+    ifelse( N$lesion_label == "nonmassB", "NC", "C") -> N$lesion_label
+    T2features = N
+    
+  }
+  if(subdata=="stage1"){
+    # organized the data by subdata
+    M<-subset(T2features, lesion_label=="massB" | lesion_label=="massM")
+    ifelse( M$lesion_label == "massB", "mass", "mass") -> M$lesion_label
+    N<-subset(T2features, lesion_label=="nonmassB" | lesion_label=="nonmassM")
+    ifelse( N$lesion_label == "nonmassB", "nonmass", "nonmass") -> N$lesion_label
+    T2features = data.frame(rbind(M,N)) 
+
+  }
+  
+  # procees data
+  T2features$lesion_label <- as.factor(T2features$lesion_label)
+
+  return(T2features)
+}
+
+subset_feature_selection <- function(allfeatures) {
+  library(caret)
+  library(mlbench)
+  library(pROC)
+
+  ### Pre-p[rocess
+  predictors <- na.omit(allfeatures)
+  outcome <- predictors$lesion_label #[c(1,5:10)] # select 1st and 5th thru 10th variables
+
+  set.seed(2)
+  inTrain <- createDataPartition(y = outcome, ## the outcome data are needed
+                                 p = .75, ## The percentage of data in the training set
+                                 list = FALSE) ## The format of the results. 
+
+  training <- predictors[ inTrain,]
+  testing <- predictors[-inTrain,]
+  nrow( training )
+  nrow( testing )
+
+  ############ Recursive Feature Selection via caret 
+  # fit models with subset sizes of 1:10, 15, 20, 25, 30, 35, 40, 45, 50, 55
+  subsets <- c( c(1:10),seq(15,50,5) )
+
+  # create control object for Controlling the Feature Selection Algorithms
+  # Right now performs 10 repeated cross validation
+  RFctrl <- rfeControl(functions = treebagFuncs, 
+                       method = "repeatedcv", 
+                       repeats = 1,
+                       verbose = FALSE,
+                       returnResamp = "all")
+
+  set.seed(10)
+  # Run recursive feature selection (RFE) algorithm
+  rfSelProfile <- rfe( predictors[, 3:ncol(predictors)], outcome, sizes = subsets, rfeControl = RFctrl)
+
+  print(rfSelProfile )
+
+  # The predictors function can be used to get a text string of variable names that were picked in      the final model. 
+  # The model can be used to get best subset and predictions for future or test samples.
+  print(rfSelProfile$bestSubset)
+  print(rfSelProfile$optVariables)
+
+  # Also the resampling results are stored in the sub-object 
+  # and can be used with several lattice functions. Univariate lattice functions (densityplot, histogram) 
+  # can be used to plot the resampling distribution while bivariate functions (xyplot, stripplot) 
+  # can be used to plot the distributions for different subset sizes.
+  #head(rfSelProfile$resample)
+
+  # plot to visualize the results. 
+  plot(rfSelProfile, type = c("g", "o"))
+
+  ## Create dataframe with one selected features
+  selfeatures = data.frame(training[,c("lesion_label",rfSelProfile$optVariables)])
+
+  ################
+  ## For picking subset sizes:
+  ## Maximize Accuracy
+  performance <- data.frame(Accuracy = rfSelProfile$results$Accuracy,
+            Variables = rfSelProfile$results$Variables)
+
+  ## Percent Loss in performance (positive)
+  performance$PctLoss <- (max(performance$Accuracy ) - performance$Accuracy )/max(performance$Accuracy )*100
+
+  plot(performance$Variables , performance$Accuracy, type="p",  col="blue", xlab="Variables", ylab="Accuracy")
+  lines(performance$Variables , performance$Accuracy, col="blue") 
+  grid(10, 10, col = "lightgray", lty = "dotted", lwd = par("lwd"))
+  Axis(at =  seq(0, 80, 5), side=1, labels = TRUE)
+
+  absoluteBest <- pickSizeBest(performance, metric = "Accuracy", maximize = TRUE)
+  within5Pct <- pickSizeTolerance(performance, metric = "Accuracy", maximize = TRUE)
+
+  cat("numerically optimal:", performance$Accuracy[performance$Variables==absoluteBest ],"Accuracy with subset",absoluteBest, "\n")
+  cat("Accepting a 1.5% Accuracy loss:", performance$Accuracy[performance$Variables==within5Pct ],"Accuracy with subset",within5Pct, "\n")
+
+  plot(performance$Variables , performance$PctLoss, type="p",  col="blue", xlab="Variables", ylab="Accuracy % Loss")
+  lines(performance$Variables , performance$PctLoss, col="blue") 
+  ### Add those points to plot
+  points(absoluteBest, performance$PctLoss[performance$Variables==absoluteBest], type="p", col="red", bg="red", pch=22, lwd=1)
+  points(within5Pct, performance$PctLoss[performance$Variables==within5Pct], type="p", col="black", bg="black", pch=25, lwd=1)
+  # Organize plot
+  grid(10, 10, col = "lightgray", lty = "dotted", lwd = par("lwd"))
+  Axis(at =  seq(0, 80, 5), side=1, labels = TRUE)
+  legend("topright", legend = c("absolute Best Set","within tolerance Loss "), pch = c(22,25), col=c("red","black"), pt.bg=c("red","black"), text.col=c("red","black"))
+
+  ################
+  ## Variable importance evaluation
+  # Random Forest: from the R package
+  selvarImp <- varImp(rfSelProfile, scale = TRUE)
+
+  selfeatureswtol = data.frame(allfeatures[,c("lesion_label",rownames(selvarImp)[1:within5Pct])])
+
+  output<-list(selfeatures=selfeatureswtol, selvarImp=selvarImp, within5Pct=within5Pct)
+  return(output)  
+}
+
+# read datasets
+T2massfeatures = read_T2data(subdata="mass")
+T2nonmassfeatures = read_T2data(subdata="nonmass")
+T2allfeatures = read_T2data(subdata="all")
+
+# format datasets for B or M
+T2allfeaturesBorM = T2allfeatures
+T2massfeaturesBorM = T2massfeatures
+T2nonmassfeaturesBorM = T2nonmassfeatures
+
+output_onlyMass = subset_feature_selection(T2massfeaturesBorM)
+output_onlyNonmass = subset_feature_selection(T2nonmassfeaturesBorM)
+
+selvarImpMass = output_onlyMass$selvarImp
+selvarImpMass$SelectedFeatureGroup = "mass"
+selvarImpNonMass = output_onlyNonmass$selvarImp
+selvarImpNonMass$SelectedFeatureGroup = "nonmass"
+allselvarImp = rbind(selvarImpMass, selvarImpNonMass)
+
+library("lattice")
+library("latticeExtra")
+require(ggplot2)
+
+# plot
+g <- ggplot(allselvarImp, aes(x = reorder(rownames(allselvarImp), allselvarImp$Overall),
+    y = Overall, fill = SelectedFeatureGroup))
+g + geom_bar() + coord_flip() + theme_bw(base_size = 16) + labs(title = "Selected features for Mass and Non-mass B vs. M lesions", 
+    x = "", y = "variable importance ranking")
+
+# read for mass
+T2massfeatures = read_T2data(subdata = "mass")
+T2nonmassfeatures = read_T2data(subdata = "nonmass")
+
+### print number of total lesions with T2w features
+# before was ##   C / NC = 140 / 132
+print(summary(T2massfeatures$lesion_label))
+# before was ##   C / NC = 63 / 65
+print(summary(T2nonmassfeatures$lesion_label))
+
+```
+
+
+Random Forest feature relevance
+=====
+```{r fig.width=10, fig.height=12}
+library("Boruta")
+require(data.table)
+# Color codes: c('green', 'yellow', 'red', 'blue'), Confirmed, Tentative,
+# Rejected and shadow.  Blue boxplots correspond to minimal, average and
+# maximum Z score of a shadow attribute. Red Boruta mass: (to run boruta
+# uncomment)
+set.seed(111)
+# load('Z:/Cristina/MassNonmass/Section1 -
+# ExperimentsUpToDate/experimentsT2/results/borutaresults.RData')
+T2massBoruta <- Boruta(lesion_label ~ ., data = na.omit(T2massfeatures[, 2:ncol(T2massfeatures)]), 
+    doTrace = 2, ntree = 5000)
+print(T2massBoruta)
+plot(T2massBoruta)
+
+# Boruta non-mass:
+set.seed(963)
+T2nonmassBoruta <- Boruta(lesion_label ~ ., data = na.omit(T2nonmassfeatures[, 
+    2:ncol(T2nonmassfeatures)]), doTrace = 2, ntree = 5000)
+print(T2nonmassBoruta)
+plot(T2nonmassBoruta)
+```
+
+
+```{r fig.width=10, fig.height=12}
+library("caret")
+confirmedT2mass <- T2massBoruta$finalDecision[T2massBoruta$finalDecision == 
+    "Confirmed"]
+tentativeT2mass <- T2massBoruta$finalDecision[T2massBoruta$finalDecision == 
+    "Tentative"]
+confirmedT2mass_features = T2massfeatures[c(names(confirmedT2mass), names(tentativeT2mass))]
+
+confirmedT2nonmass <- T2nonmassBoruta$finalDecision[T2nonmassBoruta$finalDecision == 
+    "Confirmed"]
+tentativeT2nonmass <- T2nonmassBoruta$finalDecision[T2nonmassBoruta$finalDecision == 
+    "Tentative"]
+confirmedT2nonmass_features = T2nonmassfeatures[c(names(confirmedT2nonmass), 
+    names(tentativeT2nonmass))]
+
+super.sym <- trellis.par.get("superpose.symbol")
+## plot for masses
+splom(~T2massfeatures[c(names(confirmedT2mass_features))], groups = lesion_label, 
+    data = T2massfeatures, panel = panel.superpose, key = list(title = "T2 relevant mass features", 
+        columns = 2, points = list(pch = super.sym$pch[1:2], col = super.sym$col[1:2]), 
+        text = list(c("massB", "massM"))))
+
+## plot for non-masses
+splom(~T2nonmassfeatures[c(names(confirmedT2nonmass_features))], groups = lesion_label, 
+    data = T2nonmassfeatures, panel = panel.superpose, key = list(title = "T2 relevant non-mass features", 
+        columns = 2, points = list(pch = super.sym$pch[1:2], col = super.sym$col[1:2]), 
+        text = list(c("non-massB", "non-massM"))))
+```
+
+Now correlate with BIRADS T2w descriptors (when available)
+====
+```{r fig.width=10, fig.height=12}
+BIRADS_T2massfeatures <- na.omit(T2massfeatures)
+BIRADS_T2nonmassfeatures <- na.omit(T2nonmassfeatures)
+
+print("For masses:")
+BIRADS_T2massfeatures$find_t2_signal_int <- as.factor(BIRADS_T2massfeatures$find_t2_signal_int)
+print(summary(BIRADS_T2massfeatures$find_t2_signal_int))
+
+print("For non-masses:")
+BIRADS_T2nonmassfeatures$find_t2_signal_int <- as.factor(BIRADS_T2nonmassfeatures$find_t2_signal_int)
+print(summary(as.factor(BIRADS_T2nonmassfeatures$find_t2_signal_int)))
+
+#plot
+splom(~BIRADS_T2massfeatures[c(names(confirmedT2mass))], groups = find_t2_signal_int, 
+    data = BIRADS_T2massfeatures, key = list(title = "T2 relevant mass features by BIRADS descriptors", 
+        columns = 3, points = list(pch = super.sym$pch[c(1:4)], bg = super.sym$col[c(1:4)], 
+            col = super.sym$col[c(1:4)], fill = super.sym$col[c(1:4)]), text = list(c("Hyperintense", 
+            "Hypointense or not seen", "Isointense or None", "Slightly hyperintense"))))
+####
+splom(~BIRADS_T2nonmassfeatures[c(names(confirmedT2nonmass), names(tentativeT2nonmass))], 
+    groups = find_t2_signal_int, data = BIRADS_T2nonmassfeatures, key = list(title = "T2 relevant non-mass features by BIRADS descriptors", 
+        columns = 3, points = list(pch = super.sym$pch[c(1:4)], bg = super.sym$col[c(1:4)], 
+            col = super.sym$col[c(1:4)], fill = super.sym$col[c(1:4)]), text = list(c("Hyperintense", 
+            "Hypointense or not seen", "Isointense or None", "Slightly hyperintense"))))
+```
+
+Now plot Z-scores:
+======
+```{r}
+rankingsmass <- T2massBoruta$ImpHistory
+rankingsnonmass <- T2nonmassBoruta$ImpHistory
+
+confirmedmass_T2features <- T2massBoruta$finalDecision[T2massBoruta$finalDecision == 
+    "Confirmed"]
+# Confirmed mass features
+print(confirmedmass_T2features)
+
+confirmednonmass_T2features <- T2nonmassBoruta$finalDecision[T2nonmassBoruta$finalDecision == 
+    "Confirmed"]
+# Confirmed nonmass features
+print(confirmednonmass_T2features)
+
+####### proces Masses (add fist confirmed feature)
+cfeature = as.data.frame(confirmedmass_T2features[1])
+massframe = data.frame(zscores = rankingsmass[is.finite(rankingsmass[, rownames(cfeature)]), 
+    rownames(cfeature)])
+massframe$MorN = "mass"
+massframe$feature = rownames(cfeature)
+masszscore_selected <- massframe
+
+nonmassframe = data.frame(zscores = rankingsnonmass[is.finite(rankingsnonmass[, 
+    rownames(cfeature)]), rownames(cfeature)])
+nonmassframe$MorN = "nonmass"
+nonmassframe$feature = rownames(cfeature)
+masszscore_selected[nrow(masszscore_selected) + 1:nrow(nonmassframe), ] <- nonmassframe
+
+masszscore_ttest = numeric(length(confirmedmass_T2features))
+masszscore_ttest[1] = t.test(as.data.frame(massframe)$zscores, as.data.frame(nonmassframe)$zscores, 
+    alternative = "two.sided", paired = FALSE, var.equal = FALSE)$p.value
+
+pvallabels = character(length(confirmedmass_T2features))
+pvallabels[1] <- rownames(cfeature)
+
+Medz_scoreMass = character(length(confirmedmass_T2features))
+Medz_scoreMass[1] <- median(massframe$zscores)
+Medz_scoreNonmass = character(length(confirmedmass_T2features))
+Medz_scoreNonmass[1] <- median(nonmassframe$zscores)
+
+# proces remaining confirmed feature Masses
+for (i in 2:length(confirmedmass_T2features)) {
+    cfeature = as.data.frame(confirmedmass_T2features[i])
+    massframe = data.frame(zscores = rankingsmass[, rownames(cfeature)])
+    massframe$MorN = "mass"
+    massframe$feature = rownames(cfeature)
+    masszscore_selected[nrow(masszscore_selected) + 1:nrow(massframe), ] <- massframe
+    
+    nonmassframe = data.frame(zscores = rankingsnonmass[, rownames(cfeature)])
+    nonmassframe$MorN = "nonmass"
+    nonmassframe$feature = rownames(cfeature)
+    masszscore_selected[nrow(masszscore_selected) + 1:nrow(nonmassframe), ] <- nonmassframe
+    
+    # p-values test
+    masszscore_ttest[i] = t.test(massframe$zscores[is.finite(massframe$zscores)], 
+        nonmassframe$zscores[is.finite(nonmassframe$zscores)], alternative = "two.sided", 
+        paired = FALSE, var.equal = FALSE)$p.value
+    pvallabels[i] <- rownames(cfeature)
+    
+    Medz_scoreMass[i] <- median(massframe$zscores)
+    Medz_scoreNonmass[i] <- median(nonmassframe$zscores)
+}
+
+# format p values and order in dataframe
+dt <- data.table(masszscore_ttest)
+pval <- dt[, list(pvalue = paste0("pval: ", format.pval(masszscore_ttest, eps = 0.001)))]
+
+pvalframe = data.frame(pvalue = pval)
+pvalframe$feature = pvallabels
+pvalframe$Medz_scoreMass = Medz_scoreMass
+pvalframe$Medz_scoreNonmass = Medz_scoreNonmass
+print(pvalframe)
+```
+
+
+```{r fig.width=10, fig.height=12}
+# Create steam plot with MedZ-scores mass vs. non-mass
+pvalframe$Medz_scoreNonmass <- as.numeric(pvalframe$Medz_scoreNonmass)
+pvalframe$Medz_scoreMass <- as.numeric(pvalframe$Medz_scoreMass)
+# pvalframe <- pvalframe[order(pvalframe$Medz_scoreMass, decreasing =
+# TRUE),] # sort decre by Medz_scoreMass
+pvalframe$feature <- factor(pvalframe$feature)  # it must be a factor
+pvalframe$Medz_scoreNonmass[pvalframe$Medz_scoreNonmass == -Inf] = 0
+
+pvalframe$color <- "skyblue3"
+dotchart(pvalframe$Medz_scoreNonmass, labels = pvalframe$feature, cex = 0.8, 
+    pch = 24, lwd = 2, xlim = range(-1, 18), gcolor = "black", lcolor = pvalframe$color, 
+    bg = pvalframe$color)
+par(new = TRUE)
+dotchart(pvalframe$Medz_scoreMass, labels = pvalframe$feature, cex = 0.8, pch = 22, 
+    lwd = 2, xlim = range(-1, 18), gcolor = "black", lcolor = pvalframe$color, 
+    bg = pvalframe$color, main = "Median Z-scores for mass and non-mass lesions\ngrouped by feature type", 
+    xlab = "median Z-score relevance")
+legend("topright", legend = c("mass", "nonmass"), pch = c(22, 24), lwd = 2, 
+    col = c("skyblue3", "skyblue3"))
+```
+
+```{r fig.width=10, fig.height=12}
+pvalframe_mass = pvalframe
+
+####### proces Non-Masses
+bfeature = as.data.frame(confirmednonmass_T2features[1])
+nonmassframe = data.frame(zscores = rankingsnonmass[is.finite(rankingsnonmass[, 
+    rownames(bfeature)]), rownames(bfeature)])
+nonmassframe$MorN = "nonmass"
+nonmassframe$feature = rownames(bfeature)
+nonmasszscore_selected <- nonmassframe
+
+massframe = data.frame(zscores = rankingsmass[is.finite(rankingsmass[, rownames(bfeature)]), 
+    rownames(bfeature)])
+massframe$MorN = "mass"
+massframe$feature = rownames(bfeature)
+nonmasszscore_selected[nrow(nonmasszscore_selected) + 1:nrow(massframe), ] <- massframe
+
+nonmasszscore_ttest = numeric(length(confirmednonmass_T2features))
+nonmasszscore_ttest[1] = t.test(as.data.frame(nonmassframe)$zscores, as.data.frame(massframe)$zscores, 
+    alternative = "two.sided", paired = FALSE, var.equal = FALSE)$p.value
+
+Medz_scoreNonmass = character(length(confirmednonmass_T2features))
+Medz_scoreNonmass[1] <- median(nonmassframe$zscores)
+Medz_scoreMass = character(length(confirmednonmass_T2features))
+Medz_scoreMass[1] <- median(massframe$zscores)
+
+pvallabels = character(length(confirmednonmass_T2features))
+pvallabels[1] <- rownames(bfeature)
+
+for (i in 2:length(confirmednonmass_T2features)) {
+    bfeature = as.data.frame(confirmednonmass_T2features[i])
+    nonmassframe = data.frame(zscores = rankingsnonmass[is.finite(rankingsnonmass[, 
+        rownames(bfeature)]), rownames(bfeature)])
+    nonmassframe$MorN = "nonmass"
+    nonmassframe$feature = rownames(bfeature)
+    nonmasszscore_selected[nrow(nonmasszscore_selected) + 1:nrow(nonmassframe), 
+        ] <- nonmassframe
+    
+    massframe = data.frame(zscores = rankingsmass[is.finite(rankingsmass[, rownames(bfeature)]), 
+        rownames(bfeature)])
+    massframe$MorN = "mass"
+    massframe$feature = rownames(bfeature)
+    nonmasszscore_selected[nrow(nonmasszscore_selected) + 1:nrow(massframe), 
+        ] <- massframe
+    
+    # p-values test
+    nonmasszscore_ttest[i] = t.test(as.data.frame(nonmassframe)$zscores, as.data.frame(massframe)$zscores, 
+        alternative = "two.sided", paired = FALSE, var.equal = FALSE)$p.value
+    
+    pvallabels[i] <- rownames(bfeature)
+    Medz_scoreMass[i] <- median(massframe$zscores)
+    Medz_scoreNonmass[i] <- median(nonmassframe$zscores)
+}
+
+# format p values and order in dataframe
+dt <- data.table(nonmasszscore_ttest)
+pval <- dt[, list(pvalue = paste0("pval: ", format.pval(nonmasszscore_ttest, 
+    eps = 0.001)))]
+
+pvalframe = data.frame(pvalue = pval)
+pvalframe$feature = pvallabels
+pvalframe$Medz_scoreNonmass = Medz_scoreNonmass
+pvalframe$Medz_scoreMass = Medz_scoreMass
+print(pvalframe)
+```
+
+
+```{r fig.width=10, fig.height=12}
+# Create steam plot with MedZ-scores mass vs. non-mass
+pvalframe$Medz_scoreNonmass <- as.numeric(pvalframe$Medz_scoreNonmass)
+pvalframe$Medz_scoreMass <- as.numeric(pvalframe$Medz_scoreMass)
+# pvalframe <- pvalframe[order(pvalframe$Medz_scoreMass, decreasing =
+# TRUE),] # sort decre by Medz_scoreMass
+pvalframe$feature <- factor(pvalframe$feature)  # it must be a factor
+pvalframe$Medz_scoreNonmass[pvalframe$Medz_scoreNonmass == -Inf] = 0
+
+pvalframe$color <- "mediumpurple3"
+dotchart(pvalframe$Medz_scoreNonmass, labels = pvalframe$feature, cex = 0.8, 
+    pch = 24, lwd = 2, xlim = range(-1, 19), gcolor = "black", lcolor = pvalframe$color, 
+    bg = pvalframe$color)
+par(new = TRUE)
+dotchart(pvalframe$Medz_scoreMass, labels = pvalframe$feature, cex = 0.8, pch = 22, 
+    lwd = 2, xlim = range(-1, 19), gcolor = "black", lcolor = pvalframe$color, 
+    bg = pvalframe$color, main = "Median Z-scores for mass and non-mass lesions\ngrouped by feature type", 
+    xlab = "median Z-score relevance")
+legend("topright", legend = c("mass", "nonmass"), pch = c(22, 24), lwd = 2)
+```
+
+```{r}
+pvalframe_nonmass = pvalframe
+save.image("Z:/Cristina/MassNonmass/Section 2 - Experiments/featureRelevance/Rdata/T2_FeatureRelevance.RData")
+
+```
+

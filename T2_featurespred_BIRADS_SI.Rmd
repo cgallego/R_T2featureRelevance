@@ -1,0 +1,201 @@
+What features are most predictive of BIRADS T2SI?
+================
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width =250)
+```
+
+```{r}
+require(ggplot2)
+library("RSQLite")
+setwd("Z:/Cristina/MassNonmass/Section 2 - Experiments/featureRelevance")
+```
+
+```{r fig.width=10, fig.height=12}
+read_T2data <- function(subdata) {
+  sqlite <- dbDriver("SQLite")
+  conn <- dbConnect(sqlite, "stage1T2updatedFeatures.db")
+  
+  # 2) all T1W features
+  lesionsQuery <- dbGetQuery(conn, "SELECT *
+           FROM  stage1features
+           INNER JOIN lesion ON (stage1features.lesion_id = lesion.lesion_id)
+           INNER JOIN f_T2 ON (stage1features.lesion_id = f_T2.lesion_id)")
+  
+  # prune entries and extract feature subsets
+  # corresponds to 5 entries lesion info, 34 dynamic, 19 morpho, 34 texture fueatures
+  lesionfields =  names(lesionsQuery)
+  lesioninfo = lesionsQuery[c(2,130,130:154)]
+  T2info = lesionsQuery[c(155:202)]
+  T2features = lesionsQuery[c(156,153,157,165:166,168:202,104:123)]
+  
+  T2features$lesion_label <- as.factor(T2features$lesion_label)
+  summary(T2features$lesion_label)
+ 
+    
+  if(subdata=="mass"){
+    # organized the data by subdata
+    M<-subset(T2features, lesion_label=="massB" | lesion_label=="massM")
+    ifelse( M$lesion_label == "massB", "NC", "C") -> M$lesion_label
+    T2features = M
+    
+  }
+  if(subdata=="nonmass"){
+    # organized the data by subdata
+    N<-subset(T2features, lesion_label=="nonmassB" | lesion_label=="nonmassM")
+    ifelse( N$lesion_label == "nonmassB", "NC", "C") -> N$lesion_label
+    T2features = N
+    
+  }
+  if(subdata=="stage1"){
+    # organized the data by subdata
+    M<-subset(T2features, lesion_label=="massB" | lesion_label=="massM")
+    ifelse( M$lesion_label == "massB", "mass", "mass") -> M$lesion_label
+    N<-subset(T2features, lesion_label=="nonmassB" | lesion_label=="nonmassM")
+    ifelse( N$lesion_label == "nonmassB", "nonmass", "nonmass") -> N$lesion_label
+    T2features = data.frame(rbind(M,N)) 
+
+  }
+  
+  # procees data
+  T2features$lesion_label <- as.factor(T2features$lesion_label)
+
+  return(T2features)
+}
+
+# read datasets
+T2massfeatures = read_T2data(subdata="mass")
+T2nonmassfeatures = read_T2data(subdata="nonmass")
+T2allfeatures = read_T2data(subdata="all")
+
+# format datasets for B or M
+T2allfeaturesBorM = T2allfeatures
+T2massfeaturesBorM = T2massfeatures
+T2nonmassfeaturesBorM = T2nonmassfeatures
+```
+
+```{r fig.width=7, fig.height=6}
+T2allfeaturest2_signal = na.omit(T2allfeatures)
+summary(T2allfeaturest2_signal$lesion_label)
+
+T2featurest2_signal = cbind(T2allfeaturest2_signal[3], T2allfeaturest2_signal[-3][2:59])
+
+# first predict between Hyperintense and Hypointensity
+BIRADS_HyperHypo = T2featurest2_signal[T2featurest2_signal$find_t2_signal_int != 
+    "None", ]
+BIRADS_HyperHypo = BIRADS_HyperHypo[BIRADS_HyperHypo$find_t2_signal_int != 
+    "Slightly hyperintense", ]
+BIRADS_HyperHypo$find_t2_signal_int = as.factor(BIRADS_HyperHypo$find_t2_signal_int)
+summary(BIRADS_HyperHypo$find_t2_signal_int)
+
+# Random Forest feature relevance
+library("Boruta")
+set.seed(1)
+BIRADS_HyperHypo_Boruta <- Boruta(find_t2_signal_int ~ . - lesion_label, 
+    data = BIRADS_HyperHypo, doTrace = 2, ntree = 5000)
+
+print(BIRADS_HyperHypo_Boruta)
+
+
+# second predict between Hyperintense and Slightly hyperintense
+BIRADS_HyperSligHyper = T2featurest2_signal[T2featurest2_signal$find_t2_signal_int != 
+    "None", ]
+BIRADS_HyperSligHyper = BIRADS_HyperSligHyper[BIRADS_HyperSligHyper$find_t2_signal_int != 
+    "Hypointense or not seen", ]
+BIRADS_HyperSligHyper$find_t2_signal_int = as.factor(BIRADS_HyperSligHyper$find_t2_signal_int)
+summary(BIRADS_HyperSligHyper$find_t2_signal_int)
+
+set.seed(2)
+BIRADS_HyperSligHyper_Boruta <- Boruta(find_t2_signal_int ~ . - lesion_label, 
+    data = BIRADS_HyperSligHyper, doTrace = 2, ntree = 5000)
+print(BIRADS_HyperSligHyper_Boruta)
+
+```
+
+
+```{r fig.width=10, fig.height=12}
+library("caret")
+confirmedT2_HyperHypo <- BIRADS_HyperHypo_Boruta$finalDecision[BIRADS_HyperHypo_Boruta$finalDecision == 
+    "Confirmed"]
+tentativeT2_HyperHypo <- BIRADS_HyperHypo_Boruta$finalDecision[BIRADS_HyperHypo_Boruta$finalDecision == 
+    "Tentative"]
+confirmedT2_HyperHypo = BIRADS_HyperHypo[c(names(confirmedT2_HyperHypo), names(tentativeT2_HyperHypo))]
+
+confirmedT2_HyperSligHyper <- BIRADS_HyperSligHyper_Boruta$finalDecision[BIRADS_HyperSligHyper_Boruta$finalDecision == 
+    "Confirmed"]
+tentativeT2_HyperSligHyper <- BIRADS_HyperSligHyper_Boruta$finalDecision[BIRADS_HyperSligHyper_Boruta$finalDecision == 
+    "Tentative"]
+confirmedT2_HyperSligHyper = T2nonmassfeatures[c(names(confirmedT2_HyperSligHyper), 
+    names(tentativeT2_HyperSligHyper))]
+
+super.sym <- trellis.par.get("superpose.symbol")
+## plot for masses
+splom(~BIRADS_HyperHypo[c(names(confirmedT2_HyperHypo))], groups = lesion_label, 
+    data = BIRADS_HyperHypo, panel = panel.superpose, key = list(title = "T2 relevant BIRADS_HyperHypo features", 
+        columns = 4, points = list(pch = super.sym$pch[1:4], col = super.sym$col[1:4], 
+            fill = super.sym$col[1:4]), text = list(c("massB", "massM", "nonmassB", 
+            "nonmassM"))))
+
+## plot for non-masses
+splom(~BIRADS_HyperSligHyper[c(names(confirmedT2_HyperSligHyper))], groups = lesion_label, 
+    data = BIRADS_HyperSligHyper, panel = panel.superpose, key = list(title = "T2 relevant BIRADS_HyperSligHyper features", 
+        columns = 4, points = list(pch = super.sym$pch[1:4], col = super.sym$col[1:4]), 
+        text = list(c("massB", "massM", "nonmassB", "nonmassM"))))
+
+# Now plot z-scores
+rankings_HyperHypo <- BIRADS_HyperHypo_Boruta$ImpHistory
+rankings_HyperSligHyper <- BIRADS_HyperSligHyper_Boruta$ImpHistory
+
+Hypoframezscore_selected = {}
+# proces HyperHypo = 7
+for (i in 1:length(confirmedT2_HyperHypo)) {
+    cfeature = as.data.frame(confirmedT2_HyperHypo[i])
+    HyperHypoframe = data.frame(zscores = rankings_HyperHypo[, colnames(cfeature)])
+    HyperHypoframe$MorN = "HyperHypo"
+    HyperHypoframe$feature = colnames(cfeature)
+    Hypoframezscore_selected <- rbind(Hypoframezscore_selected, HyperHypoframe)
+}
+
+# add shadow mean
+HyperHypoframe = data.frame(zscores = rankings_HyperHypo[, "shadowMean"])
+HyperHypoframe$MorN = "HyperHypo"
+HyperHypoframe$feature = "shadowMean"
+Hypoframezscore_selected <- rbind(Hypoframezscore_selected, HyperHypoframe)
+
+Hyperframezscore_selected = {}
+
+# proces SligHyper = 9
+for (i in 1:length(confirmedT2_HyperSligHyper)) {
+    cfeature = as.data.frame(confirmedT2_HyperSligHyper[i])
+    HyperSligHyperframe = data.frame(zscores = rankings_HyperSligHyper[, colnames(cfeature)])
+    HyperSligHyperframe$MorN = "HyperSligHyper"
+    HyperSligHyperframe$feature = colnames(cfeature)
+    Hyperframezscore_selected <- rbind(Hyperframezscore_selected, HyperSligHyperframe)
+}
+
+# add shadow mean
+HyperSligHyperframe = data.frame(zscores = rankings_HyperSligHyper[, "shadowMean"])
+HyperSligHyperframe$MorN = "HyperSligHyper"
+HyperSligHyperframe$feature = "shadowMean"
+Hyperframezscore_selected <- rbind(Hyperframezscore_selected, HyperSligHyperframe)
+
+# plot for predicting Hyper vs. Hypo
+p <- ggplot(Hypoframezscore_selected, aes(factor(feature), zscores, fill = factor(MorN)))
+p + geom_boxplot() + coord_flip() + labs(title = "most predictive features for Hyper vs. Hypo")
+
+# for predicting Hyper vs. SligHyper
+p <- ggplot(Hyperframezscore_selected, aes(factor(feature), zscores, fill = factor(MorN)))
+p + geom_boxplot() + coord_flip() + labs(title = "most predictive features for Hyper vs. SligHyper")
+
+
+# together
+zscore_selected = rbind(Hypoframezscore_selected, Hyperframezscore_selected)
+summary(as.factor(zscore_selected$MorN))
+
+p <- ggplot(zscore_selected, aes(factor(feature), zscores, fill = factor(MorN)))
+p + geom_boxplot() + coord_flip() + labs(title = "most predictive features BIRADS T2SI")
+
+```
+
+```{r}
+save.image("Z:/Cristina/MassNonmass/Section 2 - Experiments/featureRelevance/Rdata/T2_featurespred_BIRADS_SI.RData")
+```
